@@ -58,13 +58,17 @@ input {
 
 .text-hitbox {
   position: absolute;
+  z-index: 1;
   margin: 0;
   padding: 0;
   border: 1px solid transparent;
   border-radius: 2px;
   background: rgb(255 220 0 / 8%);
+  color: transparent;
   cursor: pointer;
   pointer-events: auto;
+  font-family: Arial, sans-serif;
+  overflow: hidden;
 }
 
 .text-hitbox:hover {
@@ -75,6 +79,24 @@ input {
 .text-hitbox.selected {
   border: 2px solid #2563eb;
   background: rgb(37 99 235 / 30%);
+}
+
+.text-hitbox.replaced {
+  z-index: 2;
+  display: block;
+  border: none;
+  border-radius: 0;
+  background: white;
+  color: #202124;
+  cursor: pointer;
+  font-family: Arial, sans-serif;
+  font-weight: 400;
+  overflow: visible;
+}
+
+.text-hitbox.replaced:hover {
+  border: 1px solid #2563eb;
+  background: white;
 }
 
 #selection-panel {

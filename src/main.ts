@@ -108,7 +108,6 @@ function splitIntoWords(item: PdfTextItem): EditableTextItem[] {
   const measuredWidths = words.map((word) =>
     context.measureText(word).width,
   );
-
   const totalWidth = measuredWidths.reduce(
     (sum, width) => sum + width,
     0,
@@ -143,7 +142,7 @@ function selectText(
   item: EditableTextItem,
   button: HTMLButtonElement,
 ): void {
-  if (selectedButton) {
+  if (selectedButton && selectedButton !== button) {
     selectedButton.classList.remove("selected");
     selectedButton.setAttribute("aria-pressed", "false");
   }
@@ -160,7 +159,7 @@ function selectText(
   selectedSize.textContent =
     `${item.width.toFixed(1)} × ${item.height.toFixed(1)}`;
 
-  replacementInput.value = item.text;
+  replacementInput.value = item.replacementText ?? item.text;
   replacementInput.disabled = false;
   applyReplacementButton.disabled = false;
 
@@ -193,10 +192,10 @@ function createTextHighlight(
 
 function renderExtractedText(): void {
   output.textContent = textItems
-    .map(
-      (item) =>
-        `${item.text} | x=${item.x.toFixed(1)} | y=${item.y.toFixed(1)} | width=${item.width.toFixed(1)}`,
-    )
+    .map((item) => {
+      const displayText = item.replacementText ?? item.text;
+      return `${displayText} | x=${item.x.toFixed(1)} | y=${item.y.toFixed(1)} | width=${item.width.toFixed(1)}`;
+    })
     .join("\n");
 }
 
@@ -213,7 +212,59 @@ function resetSelection(): void {
   replacementInput.disabled = true;
   applyReplacementButton.disabled = true;
 
-  editStatus.textContent = "Select a word to begin editing.";
+  editStatus.textContent = "Select a text item to begin editing.";
+}
+
+function applyVisualReplacement(
+  item: EditableTextItem,
+  button: HTMLButtonElement,
+  replacement: string,
+): void {
+  item.replacementText = replacement;
+
+  // Convert the measured PDF height into the displayed canvas size.
+  const displayedCanvas = canvas.getBoundingClientRect();
+  const displayScale = displayedCanvas.height / canvas.height;
+  const fontSize = Math.max(8, item.height * displayScale * 0.8);
+
+  // Turn the selection button into a visual cover and replacement label.
+  button.classList.remove("selected");
+  button.classList.add("replaced");
+  button.textContent = replacement;
+  button.title = `Replacement: ${replacement}`;
+  button.setAttribute("aria-label", `Replacement text: ${replacement}`);
+  button.setAttribute("aria-pressed", "false");
+
+  button.style.width = "max-content";
+  button.style.minWidth = `${Math.max(1, item.width * displayScale)}px`;
+  button.style.height = `${Math.max(1, item.height * displayScale)}px`;
+  button.style.fontSize = `${fontSize}px`;
+  button.style.lineHeight = "1";
+  button.style.padding = "0";
+  button.style.textAlign = "left";
+  button.style.whiteSpace = "pre";
+  button.style.overflow = "visible";
+
+  // The selection is no longer active after applying the replacement.
+  selectedItem = null;
+  selectedButton = null;
+
+  selectedText.textContent = replacement;
+  selectedPosition.textContent =
+    `${item.x.toFixed(1)}, ${item.y.toFixed(1)}`;
+  selectedSize.textContent =
+    `${item.width.toFixed(1)} × ${item.height.toFixed(1)}`;
+
+  replacementInput.value = "";
+  replacementInput.disabled = true;
+  applyReplacementButton.disabled = true;
+
+  selectionHint.textContent = "Visual replacement applied.";
+  editStatus.textContent =
+    "The replacement is visible in the preview. " +
+    "The original PDF file has not been modified.";
+
+  renderExtractedText();
 }
 
 input.addEventListener("change", async () => {
@@ -231,7 +282,6 @@ input.addEventListener("change", async () => {
 
   try {
     const items = await inspectPdf(file, canvas);
-
     textItems = items.flatMap(splitIntoWords);
 
     for (const item of textItems) {
@@ -264,23 +314,5 @@ applyReplacementButton.addEventListener("click", () => {
     return;
   }
 
-  const previousText = selectedItem.text;
-
-  // This updates only the in-memory preview model, not the PDF file.
-  selectedItem.text = replacement;
-  selectedButton.textContent = "";
-  selectedButton.title = `Selected replacement: ${replacement}`;
-  selectedButton.setAttribute(
-    "aria-label",
-    `Selected replacement: ${replacement}`,
-  );
-
-  selectedText.textContent = replacement;
-  replacementInput.value = replacement;
-
-  renderExtractedText();
-
-  editStatus.textContent =
-    `Preview model updated from "${previousText}" to "${replacement}". ` +
-    "The original PDF file has not been modified.";
+  applyVisualReplacement(selectedItem, selectedButton, replacement);
 });
