@@ -1,6 +1,9 @@
 
 import "./style.css";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { inspectPdf, type PdfTextItem } from "./pdfInspector";
+
+const RENDER_SCALE = 1.5;
 
 const app = document.querySelector<HTMLDivElement>("#app");
 
@@ -11,7 +14,7 @@ if (!app) {
 app.innerHTML = `
   <main class="editor">
     <h1>PDF In-Place Editor</h1>
-    <p>Upload a PDF, select a word, and prepare a replacement.</p>
+    <p>Upload a PDF, select text, and preview a replacement.</p>
 
     <label for="pdf-file">Choose a PDF file</label>
     <input id="pdf-file" type="file" accept="application/pdf" />
@@ -52,8 +55,12 @@ app.innerHTML = `
         Apply Replacement
       </button>
 
+      <button id="download-pdf" type="button" disabled>
+        Download Edited PDF
+      </button>
+
       <p id="edit-status" role="status">
-        Select a word to begin editing.
+        Select text to begin editing.
       </p>
     </section>
 
@@ -67,18 +74,18 @@ const canvas = document.querySelector<HTMLCanvasElement>("#pdf-canvas")!;
 const overlay = document.querySelector<HTMLDivElement>("#text-overlay")!;
 const output = document.querySelector<HTMLPreElement>("#text-output")!;
 const status = document.querySelector<HTMLElement>("#status")!;
-
 const selectedText = document.querySelector<HTMLElement>("#selected-text")!;
 const selectedPosition = document.querySelector<HTMLElement>(
   "#selected-position",
 )!;
 const selectedSize = document.querySelector<HTMLElement>("#selected-size")!;
 const selectionHint = document.querySelector<HTMLElement>("#selection-hint")!;
-
 const replacementInput =
   document.querySelector<HTMLInputElement>("#replacement-text")!;
-const applyReplacementButton =
+const applyButton =
   document.querySelector<HTMLButtonElement>("#apply-replacement")!;
+const downloadButton =
+  document.querySelector<HTMLButtonElement>("#download-pdf")!;
 const editStatus = document.querySelector<HTMLElement>("#edit-status")!;
 
 interface EditableTextItem extends PdfTextItem {
@@ -86,6 +93,7 @@ interface EditableTextItem extends PdfTextItem {
   replacementText?: string;
 }
 
+let originalFile: File | null = null;
 let textItems: EditableTextItem[] = [];
 let selectedItem: EditableTextItem | null = null;
 let selectedButton: HTMLButtonElement | null = null;
@@ -104,37 +112,36 @@ function splitIntoWords(item: PdfTextItem): EditableTextItem[] {
     return [{ ...item, originalText: item.text }];
   }
 
-  const words = matches.map((match) => match[0]);
-  const measuredWidths = words.map((word) =>
-    context.measureText(word).width,
-  );
-  const totalWidth = measuredWidths.reduce(
-    (sum, width) => sum + width,
-    0,
-  );
+  // Use PDF.js's reported item width as the total width.
+  // Browser measurements estimate each word's relative boundaries.
+  const fullWidth = context.measureText(item.text).width;
 
-  if (totalWidth <= 0) {
+  if (fullWidth <= 0) {
     return [{ ...item, originalText: item.text }];
   }
 
-  let consumedWidth = 0;
+  return matches.map((match) => {
+    const word = match[0];
+    const start = match.index;
+    const end = start + word.length;
 
-  return words.map((word, index) => {
-    const width =
-      index === words.length - 1
-        ? item.width - consumedWidth
-        : item.width * (measuredWidths[index] / totalWidth);
+    const startRatio =
+      context.measureText(item.text.slice(0, start)).width / fullWidth;
+    const endRatio =
+      context.measureText(item.text.slice(0, end)).width / fullWidth;
 
-    const wordItem: EditableTextItem = {
+    const relativeX = item.width * startRatio;
+    const wordWidth = item.width * (endRatio - startRatio);
+
+    return {
       ...item,
       text: word,
       originalText: word,
-      x: item.x + consumedWidth,
-      width: Math.max(0, width),
+      x: item.direction === "rtl"
+        ? item.x + item.width - relativeX - wordWidth
+        : item.x + relativeX,
+      width: Math.max(1, wordWidth),
     };
-
-    consumedWidth += width;
-    return wordItem;
   });
 }
 
@@ -142,7 +149,7 @@ function selectText(
   item: EditableTextItem,
   button: HTMLButtonElement,
 ): void {
-  if (selectedButton && selectedButton !== button) {
+  if (selectedButton) {
     selectedButton.classList.remove("selected");
     selectedButton.setAttribute("aria-pressed", "false");
   }
@@ -153,7 +160,7 @@ function selectText(
   button.classList.add("selected");
   button.setAttribute("aria-pressed", "true");
 
-  selectedText.textContent = item.text || "(Empty text item)";
+  selectedText.textContent = item.replacementText ?? item.text;
   selectedPosition.textContent =
     `${item.x.toFixed(1)}, ${item.y.toFixed(1)}`;
   selectedSize.textContent =
@@ -161,7 +168,7 @@ function selectText(
 
   replacementInput.value = item.replacementText ?? item.text;
   replacementInput.disabled = false;
-  applyReplacementButton.disabled = false;
+  applyButton.disabled = false;
 
   selectionHint.textContent = "Text item selected.";
   editStatus.textContent =
@@ -210,9 +217,9 @@ function resetSelection(): void {
 
   replacementInput.value = "";
   replacementInput.disabled = true;
-  applyReplacementButton.disabled = true;
+  applyButton.disabled = true;
 
-  editStatus.textContent = "Select a text item to begin editing.";
+  editStatus.textContent = "Select text to begin editing.";
 }
 
 function applyVisualReplacement(
@@ -222,12 +229,10 @@ function applyVisualReplacement(
 ): void {
   item.replacementText = replacement;
 
-  // Convert the measured PDF height into the displayed canvas size.
-  const displayedCanvas = canvas.getBoundingClientRect();
-  const displayScale = displayedCanvas.height / canvas.height;
+  const displayScale =
+    canvas.getBoundingClientRect().height / canvas.height;
   const fontSize = Math.max(8, item.height * displayScale * 0.8);
 
-  // Turn the selection button into a visual cover and replacement label.
   button.classList.remove("selected");
   button.classList.add("replaced");
   button.textContent = replacement;
@@ -245,26 +250,127 @@ function applyVisualReplacement(
   button.style.whiteSpace = "pre";
   button.style.overflow = "visible";
 
-  // The selection is no longer active after applying the replacement.
   selectedItem = null;
   selectedButton = null;
 
   selectedText.textContent = replacement;
-  selectedPosition.textContent =
-    `${item.x.toFixed(1)}, ${item.y.toFixed(1)}`;
-  selectedSize.textContent =
-    `${item.width.toFixed(1)} × ${item.height.toFixed(1)}`;
-
   replacementInput.value = "";
   replacementInput.disabled = true;
-  applyReplacementButton.disabled = true;
+  applyButton.disabled = true;
+
+  downloadButton.disabled = !textItems.some(
+    (textItem) => textItem.replacementText !== undefined,
+  );
 
   selectionHint.textContent = "Visual replacement applied.";
   editStatus.textContent =
-    "The replacement is visible in the preview. " +
-    "The original PDF file has not been modified.";
+    "Preview updated. Download the edited PDF to save the replacement.";
 
   renderExtractedText();
+}
+
+async function downloadEditedPdf(): Promise<void> {
+  if (!originalFile) {
+    editStatus.textContent = "Please upload a PDF first.";
+    return;
+  }
+
+  const replacements = textItems.filter(
+    (item) => item.replacementText !== undefined,
+  );
+
+  if (replacements.length === 0) {
+    editStatus.textContent = "Apply a replacement before downloading.";
+    return;
+  }
+
+  try {
+    downloadButton.disabled = true;
+    editStatus.textContent = "Preparing the edited PDF...";
+
+    const pdfDoc = await PDFDocument.load(await originalFile.arrayBuffer());
+    const page = pdfDoc.getPages()[0];
+
+    if (!page) {
+      throw new Error("The PDF has no pages.");
+    }
+
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const pageHeight = page.getHeight();
+    const pageWidth = page.getWidth();
+
+    for (const item of replacements) {
+      const replacement = item.replacementText!;
+
+      if (!/^[\x20-\x7E]*$/.test(replacement)) {
+        throw new Error(
+          "This export version supports basic English ASCII text only. " +
+          "Arabic and other Unicode text require custom font embedding.",
+        );
+      }
+
+      const x = item.x / RENDER_SCALE;
+      const baselineY = pageHeight - item.y / RENDER_SCALE;
+      const height = Math.max(item.height / RENDER_SCALE, 1);
+      const originalWidth = Math.max(item.width / RENDER_SCALE, 1);
+      const padding = 1;
+
+      const coverX = Math.max(0, x - padding);
+      const coverWidth = Math.min(
+        originalWidth + padding * 2,
+        pageWidth - coverX,
+      );
+      const coverBottom = Math.max(0, baselineY - height * 0.3);
+      const coverHeight = Math.min(
+        height * 1.35,
+        pageHeight - coverBottom,
+      );
+
+      page.drawRectangle({
+        x: coverX,
+        y: coverBottom,
+        width: coverWidth,
+        height: coverHeight,
+        color: rgb(1, 1, 1),
+        borderWidth: 0,
+      });
+
+      const fontSize = Math.max(6, height * 0.8);
+
+      page.drawText(replacement, {
+        x: coverX + padding,
+        y: baselineY - fontSize * 0.2,
+        size: fontSize,
+        font,
+        color: rgb(0.1, 0.1, 0.1),
+      });
+    }
+
+    const editedBytes = await pdfDoc.save();
+    const blob = new Blob([editedBytes], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = `edited-${originalFile.name}`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    editStatus.textContent =
+      "Download started. Open the exported PDF to verify the replacement.";
+  } catch (error) {
+    editStatus.textContent =
+      error instanceof Error
+        ? error.message
+        : "Could not export the PDF.";
+  } finally {
+    downloadButton.disabled = !textItems.some(
+      (item) => item.replacementText !== undefined,
+    );
+  }
 }
 
 input.addEventListener("change", async () => {
@@ -274,10 +380,12 @@ input.addEventListener("change", async () => {
     return;
   }
 
+  originalFile = file;
   overlay.replaceChildren();
   output.textContent = "";
   textItems = [];
   resetSelection();
+  downloadButton.disabled = true;
   status.textContent = "Inspecting PDF...";
 
   try {
@@ -294,6 +402,7 @@ input.addEventListener("change", async () => {
       `Found ${items.length} text items on page 1. ` +
       `Created ${textItems.length} selectable text regions.`;
   } catch (error) {
+    originalFile = null;
     status.textContent =
       error instanceof Error
         ? `Error: ${error.message}`
@@ -301,7 +410,7 @@ input.addEventListener("change", async () => {
   }
 });
 
-applyReplacementButton.addEventListener("click", () => {
+applyButton.addEventListener("click", () => {
   if (!selectedItem || !selectedButton) {
     editStatus.textContent = "Select a text item first.";
     return;
@@ -315,4 +424,8 @@ applyReplacementButton.addEventListener("click", () => {
   }
 
   applyVisualReplacement(selectedItem, selectedButton, replacement);
+});
+
+downloadButton.addEventListener("click", () => {
+  void downloadEditedPdf();
 });

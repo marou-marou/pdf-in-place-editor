@@ -10,6 +10,9 @@ export interface PdfTextItem {
   y: number;
   width: number;
   height: number;
+  fontName: string;
+  fontSize: number;
+  direction: "ltr" | "rtl";
 }
 
 export async function inspectPdf(
@@ -53,12 +56,18 @@ export async function inspectPdf(
       item.transform,
     );
 
+    const fontSize = Math.hypot(transform[2], transform[3]);
+    const height = fontSize || item.height * scale;
+
     return [{
       text: item.str,
       x: transform[4],
       y: transform[5],
       width: item.width * scale,
-      height: Math.hypot(transform[2], transform[3]),
+      height,
+      fontName: item.fontName,
+      fontSize,
+      direction: item.dir === "rtl" ? "rtl" : "ltr",
     }];
   });
 }
