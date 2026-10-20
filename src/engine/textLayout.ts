@@ -57,6 +57,11 @@ export interface PositionedGlyph {
   quad: [number, number][];
   /** Rendered font size in user space. */
   size: number;
+  /**
+   * For glyphs whose text is carried by another glyph of the same
+   * /ActualText span (e.g. separately drawn Arabic dots): that glyph.
+   */
+  host?: PositionedGlyph;
 }
 
 export type FontResolver = (resourceName: string) => LayoutFont | null;
@@ -121,6 +126,8 @@ export function layoutText(
         size: Math.hypot(trm[2], trm[3]) * tfs,
       };
       glyphs.push(glyph);
+      const span = innermostActualText();
+      if (span) span.glyphs.push(glyph);
       showOp.elements.push({ kind: "glyph", glyph });
       tm = multiply(translate(advance, 0), tm);
     }
@@ -134,7 +141,11 @@ export function layoutText(
   // Whether the pen was explicitly positioned since the last show operator.
   let positioned = true;
   // Open marked-content sequences; ActualText replaces glyph text for extraction.
-  const marked: { opIndex: number; actualText: boolean }[] = [];
+  const marked: { opIndex: number; actualText: string | null; glyphs: PositionedGlyph[] }[] = [];
+  function innermostActualText() {
+    for (let i = marked.length - 1; i >= 0; i -= 1) if (marked[i]!.actualText !== null) return marked[i]!;
+    return null;
+  }
   const beginShow = (opIndex: number, operator: ShowOp["operator"], quote: [number, number] | null): ShowOp => {
     const chained = !positioned && operator !== "'" && operator !== '"';
     positioned = false;
@@ -147,7 +158,7 @@ export function layoutText(
       ctm,
       startTm: tm,
       chained,
-      actualTextOps: marked.filter((m) => m.actualText).map((m) => m.opIndex),
+      actualTextOps: marked.filter((m) => m.actualText !== null).map((m) => m.opIndex),
     };
     showOps.push(showOp);
     return showOp;
@@ -158,15 +169,18 @@ export function layoutText(
     switch (op.op) {
       case "BDC": {
         const props = op.operands[1];
-        marked.push({ opIndex, actualText: props?.kind === "dict" && props.entries.has("ActualText") });
+        const actual = props?.kind === "dict" ? props.entries.get("ActualText") : undefined;
+        marked.push({ opIndex, actualText: actual?.kind === "str" ? decodeTextString(actual.bytes) : null, glyphs: [] });
         break;
       }
       case "BMC":
-        marked.push({ opIndex, actualText: false });
+        marked.push({ opIndex, actualText: null, glyphs: [] });
         break;
-      case "EMC":
-        marked.pop();
+      case "EMC": {
+        const span = marked.pop();
+        if (span?.actualText != null && span.glyphs.length > 0) applyActualText(span.glyphs, span.actualText);
         break;
+      }
       case "q":
         stack.push({ ctm, state: cloneState(state) });
         break;
@@ -262,4 +276,33 @@ export function layoutText(
   });
 
   return { glyphs, showOps };
+}
+
+/**
+ * The span's text belongs to its widest glyph (the letter body); the other
+ * glyphs (dots, marks drawn separately) carry no text and point to it.
+ */
+function applyActualText(glyphs: PositionedGlyph[], text: string): void {
+  const width = (g: PositionedGlyph) => Math.hypot(g.quad[1]![0] - g.quad[0]![0], g.quad[1]![1] - g.quad[0]![1]);
+  const host = glyphs.reduce((best, g) => (width(g) > width(best) ? g : best));
+  for (const g of glyphs) {
+    if (g === host) {
+      g.unicode = text.normalize("NFC");
+    } else {
+      g.unicode = "";
+      g.host = host;
+    }
+  }
+}
+
+/** PDF text string: UTF-16BE with BOM, otherwise PDFDocEncoding (Latin-1 subset). */
+function decodeTextString(bytes: Uint8Array): string {
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+    let s = "";
+    for (let i = 2; i + 1 < bytes.length; i += 2) s += String.fromCharCode((bytes[i]! << 8) | bytes[i + 1]!);
+    return s;
+  }
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return s;
 }

@@ -15,6 +15,13 @@ export interface EncodedGlyph {
   /** Mark positioning in thousandths of an em. */
   xOffset: number;
   yOffset: number;
+  /** Part of a right-to-left run (glyphs are in visual order). */
+  rtl?: boolean;
+  /**
+   * The font's ToUnicode entry for this glyph differs from what it stands for
+   * here (a glyph shared by different texts); the word needs /ActualText.
+   */
+  conflict?: boolean;
 }
 
 type LayoutFn = (
@@ -66,6 +73,7 @@ export class FallbackFont implements LayoutFont {
   /** Shapes one directional run and returns glyphs in visual order. */
   encode(text: string, direction: "ltr" | "rtl"): EncodedGlyph[] {
     const layout = (this.font.layout as unknown as LayoutFn).bind(this.font);
+    clearGlyphCache(this.font);
     const run = layout(text, undefined, undefined, undefined, direction);
     const visualTexts = run.glyphs.map((g) => String.fromCodePoint(...g.codePoints));
     const logical = direction === "rtl" ? [...visualTexts].reverse() : visualTexts;
@@ -84,8 +92,12 @@ export class FallbackFont implements LayoutFont {
       // Glyphs produced by decomposition (e.g. separate Arabic dots) carry no
       // code points. Map them to U+200B: viewers drop it, whereas an empty or
       // missing entry makes pdf.js emit the raw glyph code as a character.
-      const known = this.unicodes.get(newId);
-      if (known === undefined || (unicode && known === ZWSP)) this.unicodes.set(newId, unicode || ZWSP);
+      // ToUnicode holds one text per glyph: the first use wins, and later uses
+      // that mean something else are flagged so the word gets /ActualText.
+      let known = this.unicodes.get(newId);
+      if (known === ZWSP && /^\p{M}+$/u.test(unicode)) known = undefined; // placeholder -> real mark
+      if (known === undefined) this.unicodes.set(newId, unicode || ZWSP);
+      const conflict = known !== undefined && known.replace(ZWSP, "") !== unicode;
       const width = this.widths.get(newId)!;
       return {
         bytes: Uint8Array.of(newId >> 8, newId & 0xff),
@@ -95,6 +107,8 @@ export class FallbackFont implements LayoutFont {
         adjustAfter: width - pos.xAdvance * this.scale,
         xOffset: pos.xOffset * this.scale,
         yOffset: pos.yOffset * this.scale,
+        rtl: direction === "rtl",
+        conflict,
       };
     });
   }
@@ -180,34 +194,49 @@ export class FallbackFont implements LayoutFont {
 const ZWSP = "\u200B";
 
 /**
+ * fontkit caches Glyph objects with the code points of their first use, so a
+ * glyph shared by two letters (e.g. the waw body in و and ؤ) would report
+ * stale code points. Clearing the cache before shaping keeps them accurate.
+ */
+export function clearGlyphCache(font: FontkitFont): void {
+  (font as unknown as { _glyphs?: Record<number, unknown> })._glyphs = {};
+}
+
+/**
  * Text for each glyph (logical order) such that together they spell `text`.
  * Shapers drop code points when they decompose a character (e.g. alef with
- * hamza becomes alef + a hamza glyph with no code points). Characters not
- * covered by any glyph are given, in canonical decomposed form, to the
- * code-point-less glyph next to where they belong, or to the preceding glyph.
+ * hamza becomes an alef body + a hamza glyph with no code points). Missing
+ * characters are restored in canonical decomposed form: a missing combining
+ * mark goes to the code-point-less glyph right after its letter (the hamza
+ * glyph), so the shared alef body keeps plain "ا" and every word extracts
+ * correctly from ToUnicode alone; anything else goes to the preceding letter.
  */
 export function assignGlyphText(text: string, glyphTexts: readonly string[]): string[] {
   const source = text.normalize("NFD");
   const out = glyphTexts.map((t) => t.normalize("NFD"));
   let pos = 0;
   let lastFilled = -1;
-  const place = (missing: string, before: number) => {
+  const restore = (missing: string, next: number) => {
     if (!missing) return;
-    let target = -1;
-    for (let k = before - 1; k > lastFilled; k -= 1) if (out[k] === "") target = k;
-    if (target < 0) target = lastFilled >= 0 ? lastFilled : before;
-    if (target >= 0 && target < out.length) out[target] += missing;
+    const slot = lastFilled + 1;
+    if (/^\p{M}+$/u.test(missing) && slot < next && out[slot] === "") out[slot] = missing;
+    else if (lastFilled >= 0) out[lastFilled] += missing;
+    else if (next < out.length) out[next] = missing + out[next]!;
   };
   out.forEach((t, i) => {
     if (!t) return;
     const found = source.indexOf(t, pos);
-    if (found < 0) return; // Glyph text not in the input (unexpected); keep it.
-    place(source.slice(pos, found), i);
+    if (found < 0) {
+      // Label doesn't match the input: treat the glyph as carrying no text.
+      out[i] = "";
+      return;
+    }
+    if (found > pos) restore(source.slice(pos, found), i);
     pos = found + t.length;
     lastFilled = i;
   });
-  place(source.slice(pos), out.length);
-  return out;
+  restore(source.slice(pos), out.length);
+  return out.map((t) => t.normalize("NFC"));
 }
 
 function randomTag(): string {

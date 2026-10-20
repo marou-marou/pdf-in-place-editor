@@ -1,6 +1,6 @@
 import { arabicClusters, bidiRuns, hasStrongRtl, joiningType, type BidiRun } from "./arabic";
 import type { EncodedGlyph } from "./fallbackFont";
-import { FallbackFont } from "./fallbackFont";
+import { clearGlyphCache, FallbackFont } from "./fallbackFont";
 import { PdfFont, type LayoutFont } from "./fonts";
 
 export type FallbackKind = "arabic" | "latin";
@@ -71,6 +71,7 @@ function shapeWithProgram(font: PdfFont, run: BidiRun): EncodedGlyph[] | null {
       glyphs: { id: number; codePoints: number[] }[];
       positions: { xAdvance: number; xOffset: number; yOffset: number }[];
     };
+    clearGlyphCache(program);
     const shaped = layout.call(program, run.text, undefined, undefined, undefined, run.direction);
     const scale = 1000 / program.unitsPerEm;
     const out: EncodedGlyph[] = [];

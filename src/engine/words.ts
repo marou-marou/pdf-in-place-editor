@@ -98,29 +98,56 @@ function contiguity(streamOrder: readonly PositionedGlyph[]): boolean {
 }
 
 /**
- * Logical text of a line from its words in visual order: words are grouped
- * into directional runs (neutral words follow the line), runs are reversed on
- * RTL lines and RTL runs are read right to left.
+ * Logical text of a line from its words in visual order. Works per character
+ * so punctuation glued to a word (e.g. "." before an LTR run in an RTL line)
+ * lands where the bidi algorithm put it: neutrals between two characters of
+ * the same direction take that direction, otherwise the line's. Runs are then
+ * reversed on RTL lines and RTL runs are read right to left.
  */
 function logicalLineText(visualWords: readonly TextWord[], lineDirection: "ltr" | "rtl"): string {
-  const dirOf = (w: TextWord): "ltr" | "rtl" =>
-    w.direction === "rtl" ? "rtl" : /[\p{L}\p{N}]/u.test(w.text) ? "ltr" : lineDirection;
-  const runs: { dir: "ltr" | "rtl"; words: string[] }[] = [];
-  for (const w of visualWords) {
-    const dir = dirOf(w);
+  type Dir = "ltr" | "rtl" | null;
+  const visual: { ch: string; dir: Dir }[] = [];
+  const classify = (ch: string): Dir =>
+    hasStrongRtl(ch) ? "rtl" : /[\p{L}\p{N}]/u.test(ch) ? "ltr" : isMark(ch) ? "rtl" : null;
+  visualWords.forEach((w, i) => {
+    if (i > 0) visual.push({ ch: " ", dir: null });
+    const chars = [...w.text];
+    for (const ch of w.direction === "rtl" ? chars.reverse() : chars) visual.push({ ch, dir: classify(ch) });
+  });
+  // Resolve neutrals from their strong neighbours.
+  for (let i = 0; i < visual.length; i += 1) {
+    if (visual[i]!.dir !== null) continue;
+    let j = i;
+    while (j < visual.length && visual[j]!.dir === null) j += 1;
+    const before = i > 0 ? visual[i - 1]!.dir : lineDirection;
+    const after = j < visual.length ? visual[j]!.dir : lineDirection;
+    const dir = before === after ? before : lineDirection;
+    for (let k = i; k < j; k += 1) visual[k]!.dir = dir;
+    i = j - 1;
+  }
+  const runs: { dir: Dir; chars: string[] }[] = [];
+  for (const { ch, dir } of visual) {
     const last = runs[runs.length - 1];
-    if (last && last.dir === dir) last.words.push(w.text);
-    else runs.push({ dir, words: [w.text] });
+    if (last && last.dir === dir) last.chars.push(ch);
+    else runs.push({ dir, chars: [ch] });
   }
   if (lineDirection === "rtl") runs.reverse();
-  return runs.map((r) => (r.dir === "rtl" ? [...r.words].reverse() : r.words).join(" ")).join(" ");
+  return runs
+    .map((r) => (r.dir === "rtl" ? r.chars.reverse() : r.chars).join(""))
+    .join("")
+    .normalize("NFC");
 }
 
 /** Groups glyphs into baseline-aligned lines, then splits lines into words. */
 export function buildTextModel(glyphs: readonly PositionedGlyph[], pagePrefix: string): TextModel {
   const lines: { dir: [number, number]; origin: [number, number]; size: number; items: LineGlyph[] }[] = [];
 
+  type Line = (typeof lines)[number];
+  const placedIn = new Map<PositionedGlyph, { line: Line; along: number }>();
   for (const glyph of glyphs) {
+    // Glyphs drawn for another glyph's text (e.g. Arabic dots positioned with
+    // Td) join their host's line below, whatever their own baseline.
+    if (glyph.host) continue;
     const dx = glyph.end[0] - glyph.origin[0];
     const dy = glyph.end[1] - glyph.origin[1];
     const len = Math.hypot(dx, dy);
@@ -132,14 +159,22 @@ export function buildTextModel(glyphs: readonly PositionedGlyph[], pagePrefix: s
       const across = -ox * line.dir[1] + oy * line.dir[0];
       const sameDir = len === 0 || Math.abs((dx * line.dir[0] + dy * line.dir[1]) / len - 1) < 0.01;
       if (sameDir && Math.abs(across) < line.size * 0.3) {
-        line.items.push({ glyph, along: ox * line.dir[0] + oy * line.dir[1], across });
+        const along = ox * line.dir[0] + oy * line.dir[1];
+        line.items.push({ glyph, along, across });
+        placedIn.set(glyph, { line, along });
         placed = true;
       }
     }
     if (!placed) {
       const dir: [number, number] = len > 0 ? [dx / len, dy / len] : [1, 0];
-      lines.push({ dir, origin: glyph.baseline, size: glyph.size || 1, items: [{ glyph, along: 0, across: 0 }] });
+      const line: Line = { dir, origin: glyph.baseline, size: glyph.size || 1, items: [{ glyph, along: 0, across: 0 }] };
+      lines.push(line);
+      placedIn.set(glyph, { line, along: 0 });
     }
+  }
+  for (const glyph of glyphs) {
+    const home = glyph.host && placedIn.get(glyph.host);
+    if (home) home.line.items.push({ glyph, along: home.along, across: 0 });
   }
 
   const words: TextWord[] = [];

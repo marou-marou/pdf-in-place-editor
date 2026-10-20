@@ -277,7 +277,11 @@ export class PdfFont implements LayoutFont {
    * (our mapping for decomposed Arabic dots) count as no text.
    */
   unicodeOf(code: number): string {
-    return decodePresentationForm(this.rawUnicodeOf(code)).base.replace(/\u200B/g, "");
+    const raw = this.rawUnicodeOf(code);
+    // Latin ligatures (ﬁ, ﬂ, ...) read as their letters so text stays searchable.
+    const unligated = /^[\uFB00-\uFB06]$/u.test(raw) ? raw.normalize("NFKC") : raw;
+    // U+0000 and U+200B are producers' placeholders for glyphs with no text.
+    return decodePresentationForm(unligated).base.replace(/[\u0000\u200B]/g, "");
   }
 
   /** Joining form implied by a presentation-form mapping, if any. */

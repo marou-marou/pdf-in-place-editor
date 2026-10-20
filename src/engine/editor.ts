@@ -456,12 +456,48 @@ export class PdfTextEditor {
       deferred.length = 0;
     };
 
-    for (const g of seg.glyphs) {
-      if (g.bytes.length > 0 && !g.unicode && g.yOffset !== 0 && Math.abs(g.width - g.adjustAfter) < 1e-6) {
-        deferred.push({ glyph: g, at: advance });
+    // Words (split at spaces) whose glyphs' ToUnicode entries don't spell the
+    // word get an /ActualText span so extraction still yields the typed text.
+    const isSpace = (g: (typeof seg.glyphs)[number]) => /^\s$/u.test(g.unicode);
+    const wordEnds = new Set<number>();
+    const wordTexts = new Map<number, string>();
+    for (let i = 0; i < seg.glyphs.length; ) {
+      if (isSpace(seg.glyphs[i]!)) {
+        i += 1;
         continue;
       }
-      if (/^\s$/u.test(g.unicode)) drawDeferred();
+      let j = i;
+      while (j < seg.glyphs.length && !isSpace(seg.glyphs[j]!)) j += 1;
+      const word = seg.glyphs.slice(i, j);
+      if (word.some((g) => g.conflict)) {
+        const texts = word.map((g) => g.unicode);
+        wordTexts.set(i, (word[0]!.rtl ? texts.reverse() : texts).join("").normalize("NFC"));
+        wordEnds.add(j - 1);
+      }
+      i = j;
+    }
+    let openSpan = false;
+
+    for (const [index, g] of seg.glyphs.entries()) {
+      const actualText = wordTexts.get(index);
+      if (actualText !== undefined) {
+        flush();
+        out.push(`/Span <</ActualText <FEFF${utf16Hex(actualText)}>>> BDC`);
+        openSpan = true;
+      }
+      const closesSpan = openSpan && wordEnds.has(index);
+      const closeSpan = () => {
+        drawDeferred();
+        flush();
+        out.push("EMC");
+        openSpan = false;
+      };
+      if (g.bytes.length > 0 && !g.unicode && g.yOffset !== 0 && Math.abs(g.width - g.adjustAfter) < 1e-6) {
+        deferred.push({ glyph: g, at: advance });
+        if (closesSpan) closeSpan();
+        continue;
+      }
+      if (isSpace(g)) drawDeferred();
       if (g.bytes.length === 0) {
         push(g.adjustAfter);
         continue;
@@ -482,6 +518,7 @@ export class PdfTextEditor {
       // Zero-width marks must not pick up character spacing.
       if (g.width === 0 && tc) after += (tc * 1000) / tfs;
       push(after);
+      if (closesSpan) closeSpan();
     }
     drawDeferred();
     flush();
@@ -543,6 +580,12 @@ function displacement(elements: readonly ShowElement[], state: TextState): numbe
     (sum, e) => sum + (e.kind === "glyph" ? e.glyph.advance : (-e.value / 1000) * state.fontSize * state.hScale),
     0,
   );
+}
+
+function utf16Hex(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i += 1) out += text.charCodeAt(i).toString(16).toUpperCase().padStart(4, "0");
+  return out;
 }
 
 function serialize(elements: readonly ShowElement[]): string {
