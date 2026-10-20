@@ -81,23 +81,6 @@ input {
   background: rgb(37 99 235 / 30%);
 }
 
-.text-hitbox.replaced {
-  z-index: 2;
-  display: block;
-  border: none;
-  border-radius: 0;
-  background: white;
-  color: #202124;
-  cursor: pointer;
-  font-family: Arial, sans-serif;
-  font-weight: 400;
-  overflow: visible;
-}
-
-.text-hitbox.replaced:hover {
-  border: 1px solid #2563eb;
-  background: white;
-}
 
 #selection-panel {
   margin-top: 24px;
@@ -130,4 +113,33 @@ input {
   border-radius: 8px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.text-hitbox:disabled {
+  cursor: not-allowed;
+  background: rgb(220 38 38 / 10%);
+}
+
+.pager {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+#edit-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+}
+
+#edit-form label {
+  flex-basis: 100%;
+}
+
+#replacement-text {
+  margin: 0;
+  min-width: 16rem;
+  font-size: 1rem;
 }
