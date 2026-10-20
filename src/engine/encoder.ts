@@ -111,7 +111,16 @@ function encodeArabicFromInventory(font: PdfFont, text: string): EncodedGlyph[] 
       continue;
     }
     if (code === undefined || code === null) return null;
-    const glyphs = [glyphFor(font, code, cluster.base)];
+    // Glyphs the document draws with this letter (separate dots) come first so
+    // they are positioned from the body's origin; they carry no text.
+    const parts = cluster.form ? (font.formAttachments.get(`${cluster.base}|${cluster.form}`) ?? []) : [];
+    const glyphs = parts.map((p) => ({
+      ...glyphFor(font, p.code, ""),
+      adjustAfter: font.widthOf(p.code),
+      xOffset: p.xOffset,
+      yOffset: p.yOffset,
+    }));
+    glyphs.push(glyphFor(font, code, cluster.base));
     for (const mark of cluster.marks) {
       const markCode = pickCode(font, mark);
       // Only zero-advance marks can be overlaid without GPOS data.
@@ -141,8 +150,28 @@ function encodeLtrRun(font: PdfFont, text: string): EncodedGlyph[] | null {
 function encodeInOriginal(font: PdfFont, run: BidiRun): EncodedGlyph[] | null {
   if (!font.encodable) return null;
   const rtl = run.direction === "rtl" && hasStrongRtl(run.text);
-  if (rtl) return shapeWithProgram(font, run) ?? encodeArabicFromInventory(font, run.text);
-  return encodeLtrRun(font, run.text);
+  const glyphs = rtl
+    ? (shapeWithProgram(font, run) ?? encodeArabicFromInventory(font, run.text))
+    : encodeLtrRun(font, run.text);
+  if (glyphs) {
+    for (const g of glyphs) {
+      g.rtl = rtl;
+      markConflict(font, g);
+    }
+  }
+  return glyphs;
+}
+
+/**
+ * Flags glyphs whose existing ToUnicode entry doesn't say what they stand for
+ * here (a shared letter body, or a producer's placeholder such as U+0000), so
+ * the word gets /ActualText. Codes with no entry at all are filled in instead.
+ */
+function markConflict(font: PdfFont, g: EncodedGlyph): void {
+  if (g.code < 0) return;
+  const raw = font.rawUnicodeOf(g.code);
+  if (raw === "" && g.unicode !== "") return; // no entry: ToUnicode gets filled
+  if (font.unicodeOf(g.code) !== g.unicode) g.conflict = true;
 }
 
 /**

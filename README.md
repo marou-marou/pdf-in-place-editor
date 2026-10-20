@@ -55,7 +55,10 @@ For each bidi run of the replacement, in this order:
 1. **Original font, glyphs proven present.** A code is used only if the document already draws it, or the
    embedded program has a non-empty outline for it. For Arabic, the engine learns which glyph the document uses for
    each letter in each contextual form (isolated, initial, medial, final, plus lam-alef). It reads this from the
-   document's own existing words, or from presentation-form ToUnicode entries. If the subset still has GSUB and cmap,
+   document's own existing words (the letter's real position decides the form, since one glyph can serve two forms),
+   or from presentation-form ToUnicode entries. When the producer draws a letter as a body plus separate dot glyphs,
+   the whole cluster is learned and redrawn with the same offsets. Glyphs whose existing ToUnicode entry doesn't
+   match the letter they draw get an `/ActualText` span, so the edited word still extracts correctly. If the subset still has GSUB and cmap,
    it shapes with the embedded program itself, GPOS included.
 2. **Otherwise the whole run switches to a bundled font** (Noto Naskh Arabic for Arabic, DejaVu Sans for Latin, with the
    bold weight chosen to match). It is shaped with fontkit's OpenType shaper, then subset-embedded as Type0/Identity-H

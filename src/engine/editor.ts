@@ -21,7 +21,7 @@ import {
 } from "./contentStream";
 import { encodeReplacement, type EncodedSegment, type FallbackKind } from "./encoder";
 import { FallbackFont } from "./fallbackFont";
-import { PdfFont, type LayoutFont } from "./fonts";
+import { PdfFont, type ClusterPart, type LayoutFont } from "./fonts";
 import { apply, invert, multiply, streamBytes } from "./pdfUtil";
 import { layoutText, type PositionedGlyph, type ShowElement, type ShowOp, type TextState } from "./textLayout";
 import { buildTextModel, type TextLine, type TextSpan, type TextWord } from "./words";
@@ -526,7 +526,11 @@ export class PdfTextEditor {
     return { text: out.join("\n"), advance };
   }
 
-  /** Records which codes the document already draws and in which Arabic form. */
+  /**
+   * Records which codes the document already draws and, for Arabic, in which
+   * joining form, together with any glyphs drawn as part of the same letter
+   * (dots placed separately, linked through /ActualText) and their offsets.
+   */
   private recordInventory(words: readonly TextWord[]): void {
     for (const word of words) {
       if (word.direction === "ltr") {
@@ -536,36 +540,59 @@ export class PdfTextEditor {
         }
         continue;
       }
-      // Glyphs without Unicode (decomposed dots, positioned parts) mean a cluster
-      // is drawn with several glyphs; don't learn forms from such words.
-      if (word.glyphs.some((g) => g.unicode === "")) continue;
-      // Rebuild logical order: clusters by stream order, ordered right to left.
-      const clusters: { glyphs: PositionedGlyph[]; x: number }[] = [];
+      // Text-less glyphs we can't tie to a letter make the word ambiguous.
+      if (word.glyphs.some((g) => g.unicode === "" && !g.host)) continue;
+
+      // Clusters: a letter body, its attached glyphs, and marks that follow it.
+      const clusters: { body: PositionedGlyph; marks: PositionedGlyph[]; along: number }[] = [];
       for (const g of word.glyphs) {
+        if (g.host) continue;
         const last = clusters[clusters.length - 1];
-        if (last && /^\p{Mn}+$/u.test(g.unicode)) last.glyphs.push(g);
-        else clusters.push({ glyphs: [g], x: (g.origin[0] + g.end[0]) / 2 });
+        if (last && /^\p{Mn}+$/u.test(g.unicode)) last.marks.push(g);
+        else clusters.push({ body: g, marks: [], along: word.line.get(g) ?? g.origin[0] });
       }
-      clusters.sort((a, b) => b.x - a.x);
+      clusters.sort((a, b) => b.along - a.along);
       const chars: string[] = [];
       const starts: number[] = [];
       for (const c of clusters) {
         starts.push(chars.length);
-        for (const g of c.glyphs) chars.push(...g.unicode);
+        chars.push(...c.body.unicode);
+        for (const m of c.marks) chars.push(...m.unicode);
       }
       const forms = joiningForms(chars);
       clusters.forEach((c, i) => {
-        const base = c.glyphs[0]!;
-        const font = base.showOp.state.font;
+        const body = c.body;
+        const font = body.showOp.state.font;
         if (!(font instanceof PdfFont)) return;
-        let form = font.presentationFormOf(base.code) ?? forms[starts[i]!] ?? null;
-        if (base.unicode.length === 2 && base.unicode.startsWith("ل")) {
+        // The letter's position in real text decides its form. A presentation-form
+        // ToUnicode value can be wrong when one glyph serves two forms (Arial's
+        // initial and medial beh), so it is only a fallback.
+        let form = forms[starts[i]!] ?? font.presentationFormOf(body.code) ?? null;
+        if (body.unicode.length === 2 && body.unicode.startsWith("\u0644")) {
           form = form === "medi" || form === "fina" ? "fina" : "isol";
         }
-        font.recordUsage(base.code, base.unicode, form);
-        for (const mark of c.glyphs.slice(1)) font.recordUsage(mark.code, mark.unicode, null);
+        const attachments = this.attachmentsOf(body, word.glyphs);
+        if (attachments === null) return;
+        font.recordUsage(body.code, body.unicode, form, attachments);
+        for (const mark of c.marks) font.recordUsage(mark.code, mark.unicode, null);
       });
     }
+  }
+
+  /** Offsets of the glyphs drawn for `body`'s text, in thousandths of an em; null if unusable. */
+  private attachmentsOf(body: PositionedGlyph, glyphs: readonly PositionedGlyph[]): ClusterPart[] | null {
+    const parts = glyphs.filter((g) => g.host === body);
+    if (parts.length === 0) return [];
+    const { fontSize, hScale, rise, font } = body.showOp.state;
+    if (!fontSize || !hScale) return null;
+    const toText = invert(multiply(body.tm, body.showOp.ctm));
+    const out: ClusterPart[] = [];
+    for (const part of parts) {
+      if (part.showOp.state.font !== font) return null;
+      const [x, y] = apply(toText, ...part.origin);
+      out.push({ code: part.code, xOffset: (x * 1000) / (fontSize * hScale), yOffset: ((y - rise) * 1000) / fontSize });
+    }
+    return out;
   }
 }
 

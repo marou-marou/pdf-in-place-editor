@@ -88,7 +88,8 @@ async function chromeFixtures() {
     "chrome-realworld.pdf": `
       <p dir="rtl" style="font-family: Naskh; font-size: 22px">نمت الشركة بشكل مطرد هذا العام. زادت الإيرادات في كل منطقة.</p>
       <p style="font-family: Helvetica; font-size: 16px">New offices opened in Dubai and Cairo.</p>
-      <p dir="rtl" style="font-family: DV; font-size: 19px">اجتماع يوم 15 مارس في Dubai Office. الحضور إلزامي.</p>`,
+      <p dir="rtl" style="font-family: DV; font-size: 19px">اجتماع يوم 15 مارس في Dubai Office. الحضور إلزامي.</p>
+      <p dir="rtl" style="font-family: Arial; font-size: 19px">مرحبا بكم في التقرير السنوي.</p>`,
   };
   for (const [name, body] of Object.entries(docs)) {
     await page.setContent(`<!doctype html><meta charset="utf-8"><style>${css}</style>${body}`);

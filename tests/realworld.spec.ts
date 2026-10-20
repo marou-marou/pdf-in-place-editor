@@ -28,6 +28,7 @@ test("reads ActualText spans, ligatures and bidi punctuation", async () => {
     "نمت الشركة بشكل مطرد هذا العام. زادت الإيرادات في كل منطقة.",
     "New offices opened in Dubai and Cairo.",
     "اجتماع يوم 15 مارس في Dubai Office. الحضور إلزامي.",
+    "مرحبا بكم في التقرير السنوي.",
   ]);
   expect(editor.lines(0).every((l) => l.editable)).toBe(true);
 });
@@ -68,4 +69,32 @@ test("characters dropped by shaping go to the letter, not to shared dot glyphs",
   expect(assignGlyphText("ظل", ["ظ", "", "ل"])).toEqual(["ظ", "", "ل"]);
   // a stale or wrong label is dropped and its letter goes to the previous glyph
   expect(assignGlyphText("مو", ["م", "ؤ"])).toEqual(["مو", ""]);
+});
+
+test("Arabic word drawn with separate dot glyphs is re-encoded in its original font", async () => {
+  const editor = await PdfTextEditor.load(fixture("chrome-realworld.pdf"), nodeFonts);
+  const before = word(editor, "منطقة.");
+  const original = before.glyphs[0]!.showOp.state.font;
+  // Every letter form of "نمت" (with its dots) occurs elsewhere in the line.
+  const result = await editor.replaceWord(0, before.id, "نمت");
+  expect(result.usedFallback).toBe(false);
+
+  const reloaded = await PdfTextEditor.load(await save(editor, "naskh-original.pdf"), nodeFonts);
+  const after = word(reloaded, "نمت");
+  expect((after.glyphs.find((g) => !g.host)!.showOp.state.font as { baseFont: string }).baseFont).toBe(
+    (original as { baseFont: string }).baseFont,
+  );
+  // The dots were copied with the letters, not left out.
+  expect(after.glyphs.length).toBe(word(editor, "نمت").glyphs.length);
+  expect(reloaded.lines(0)[0]!.text).toBe("نمت الشركة بشكل مطرد هذا العام. زادت الإيرادات في كل نمت");
+});
+
+test("a glyph shared by initial and medial forms (Arial beh) is reused", async () => {
+  const editor = await PdfTextEditor.load(fixture("chrome-realworld.pdf"), nodeFonts);
+  // "مرحبا" needs medial beh; Arial draws it with the same glyph as initial beh
+  // and Chrome's ToUnicode labels that glyph as the initial presentation form.
+  const result = await editor.replaceWord(0, word(editor, "السنوي.").id, "مرحبا");
+  expect(result.usedFallback).toBe(false);
+  const reloaded = await PdfTextEditor.load(await save(editor, "arial-medial.pdf"), nodeFonts);
+  expect(reloaded.lines(0)[3]!.text).toBe("مرحبا بكم في التقرير مرحبا");
 });

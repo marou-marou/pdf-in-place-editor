@@ -14,6 +14,13 @@ import { parseToUnicode } from "./cmap";
 import { decodePresentationForm, type JoiningForm } from "./arabic";
 import { streamBytes } from "./pdfUtil";
 
+/** A glyph drawn with a letter body (e.g. a separate dot), offset in thousandths of an em. */
+export interface ClusterPart {
+  code: number;
+  xOffset: number;
+  yOffset: number;
+}
+
 /** What the layout and encoder need from any font, original or fallback. */
 export interface LayoutFont {
   readonly key: string;
@@ -97,8 +104,10 @@ export class PdfFont implements LayoutFont {
   readonly toUnicode: Map<number, string> | null;
   /** Codes that are actually drawn somewhere in the document. */
   readonly usedCodes = new Set<number>();
-  /** Arabic glyph inventory: `${base}|${form}` -> code. */
+  /** Arabic glyph inventory: `${base}|${form}` -> code of the letter body. */
   readonly formInventory = new Map<string, number>();
+  /** Glyphs the document draws together with that body (dots), by the same key. */
+  readonly formAttachments = new Map<string, ClusterPart[]>();
   /** ToUnicode entries to add or correct when saving. */
   readonly toUnicodeFixes = new Map<number, string>();
 
@@ -355,11 +364,15 @@ export class PdfFont implements LayoutFont {
   }
 
   /** Records a drawn glyph and, for Arabic, the form it was drawn in. */
-  recordUsage(code: number, base: string, form: JoiningForm | null): void {
+  recordUsage(code: number, base: string, form: JoiningForm | null, attachments: ClusterPart[] = []): void {
     this.usedCodes.add(code);
+    for (const part of attachments) this.usedCodes.add(part.code);
     if (form) {
       const key = `${base}|${form}`;
-      if (!this.formInventory.has(key)) this.formInventory.set(key, code);
+      if (!this.formInventory.has(key)) {
+        this.formInventory.set(key, code);
+        if (attachments.length) this.formAttachments.set(key, attachments);
+      }
     }
   }
 
