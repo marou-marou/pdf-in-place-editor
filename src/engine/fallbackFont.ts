@@ -67,6 +67,11 @@ export class FallbackFont implements LayoutFont {
   encode(text: string, direction: "ltr" | "rtl"): EncodedGlyph[] {
     const layout = (this.font.layout as unknown as LayoutFn).bind(this.font);
     const run = layout(text, undefined, undefined, undefined, direction);
+    const visualTexts = run.glyphs.map((g) => String.fromCodePoint(...g.codePoints));
+    const logical = direction === "rtl" ? [...visualTexts].reverse() : visualTexts;
+    const assigned = assignGlyphText(text, logical);
+    const texts = direction === "rtl" ? assigned.reverse() : assigned;
+
     return run.glyphs.map((glyph, i) => {
       const pos = run.positions[i]!;
       let newId = this.gidMap.get(glyph.id);
@@ -75,11 +80,12 @@ export class FallbackFont implements LayoutFont {
         this.gidMap.set(glyph.id, newId);
         this.widths.set(newId, Math.round(glyph.advanceWidth * this.scale));
       }
-      const unicode = String.fromCodePoint(...glyph.codePoints);
+      const unicode = texts[i]!;
       // Glyphs produced by decomposition (e.g. separate Arabic dots) carry no
       // code points. Map them to U+200B: viewers drop it, whereas an empty or
       // missing entry makes pdf.js emit the raw glyph code as a character.
-      if (!this.unicodes.has(newId) || (unicode && !this.unicodes.get(newId))) this.unicodes.set(newId, unicode || "\u200B");
+      const known = this.unicodes.get(newId);
+      if (known === undefined || (unicode && known === ZWSP)) this.unicodes.set(newId, unicode || ZWSP);
       const width = this.widths.get(newId)!;
       return {
         bytes: Uint8Array.of(newId >> 8, newId & 0xff),
@@ -169,6 +175,39 @@ export class FallbackFont implements LayoutFont {
       }),
     );
   }
+}
+
+const ZWSP = "\u200B";
+
+/**
+ * Text for each glyph (logical order) such that together they spell `text`.
+ * Shapers drop code points when they decompose a character (e.g. alef with
+ * hamza becomes alef + a hamza glyph with no code points). Characters not
+ * covered by any glyph are given, in canonical decomposed form, to the
+ * code-point-less glyph next to where they belong, or to the preceding glyph.
+ */
+export function assignGlyphText(text: string, glyphTexts: readonly string[]): string[] {
+  const source = text.normalize("NFD");
+  const out = glyphTexts.map((t) => t.normalize("NFD"));
+  let pos = 0;
+  let lastFilled = -1;
+  const place = (missing: string, before: number) => {
+    if (!missing) return;
+    let target = -1;
+    for (let k = before - 1; k > lastFilled; k -= 1) if (out[k] === "") target = k;
+    if (target < 0) target = lastFilled >= 0 ? lastFilled : before;
+    if (target >= 0 && target < out.length) out[target] += missing;
+  };
+  out.forEach((t, i) => {
+    if (!t) return;
+    const found = source.indexOf(t, pos);
+    if (found < 0) return; // Glyph text not in the input (unexpected); keep it.
+    place(source.slice(pos, found), i);
+    pos = found + t.length;
+    lastFilled = i;
+  });
+  place(source.slice(pos), out.length);
+  return out;
 }
 
 function randomTag(): string {

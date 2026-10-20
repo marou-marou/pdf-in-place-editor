@@ -24,7 +24,7 @@ import { FallbackFont } from "./fallbackFont";
 import { PdfFont, type LayoutFont } from "./fonts";
 import { apply, invert, multiply, streamBytes } from "./pdfUtil";
 import { layoutText, type PositionedGlyph, type ShowElement, type ShowOp, type TextState } from "./textLayout";
-import { buildWords, type TextWord } from "./words";
+import { buildTextModel, type TextLine, type TextSpan, type TextWord } from "./words";
 
 export interface FontProvider {
   /** Returns TrueType bytes for a bundled fallback font. */
@@ -46,6 +46,7 @@ interface PageModel {
   glyphs: PositionedGlyph[];
   showOps: ShowOp[];
   words: TextWord[];
+  lines: TextLine[];
   fonts: Map<string, LayoutFont | null>;
   fallbackNames: Map<FallbackFont, string>;
   dirty: boolean;
@@ -86,12 +87,18 @@ export class PdfTextEditor {
     return this.model(pageIndex).words;
   }
 
+  lines(pageIndex: number): readonly TextLine[] {
+    return this.model(pageIndex).lines;
+  }
+
   /** The word under a user-space point, if any. */
   wordAt(pageIndex: number, x: number, y: number): TextWord | null {
-    const hits = this.model(pageIndex).words.filter(
-      (w) => x >= w.box.x0 && x <= w.box.x1 && y >= w.box.y0 && y <= w.box.y1,
-    );
-    return hits.sort((a, b) => area(a.box) - area(b.box))[0] ?? null;
+    return smallestHit(this.model(pageIndex).words, x, y);
+  }
+
+  /** The line under a user-space point, if any. */
+  lineAt(pageIndex: number, x: number, y: number): TextLine | null {
+    return smallestHit(this.model(pageIndex).lines, x, y);
   }
 
   /**
@@ -104,7 +111,28 @@ export class PdfTextEditor {
     const model = this.model(pageIndex);
     const word = model.words.find((w) => w.id === wordId);
     if (!word) throw new Error("Word not found; the page may have changed.");
-    if (!word.editable) throw new Error(word.reason ?? "This word cannot be edited.");
+    return this.replaceSpan(model, word, replacement);
+  }
+
+  /**
+   * Replaces a whole line. The new text is laid out from the line's anchor
+   * (left edge for LTR lines, right edge for RTL lines); mixed text is split
+   * into bidi runs. The line is drawn in the font of its first glyph.
+   */
+  async replaceLine(pageIndex: number, lineId: string, replacement: string): Promise<EditResult> {
+    const model = this.model(pageIndex);
+    const line = model.lines.find((l) => l.id === lineId);
+    if (!line) throw new Error("Line not found; the page may have changed.");
+    const result = await this.replaceSpan(model, line, replacement);
+    const fonts = new Set(line.glyphs.map((g) => g.showOp.state.font));
+    if (fonts.size > 1) {
+      result.notes.push("The line used several fonts or styles; the replacement uses the first one.");
+    }
+    return result;
+  }
+
+  private async replaceSpan(model: PageModel, word: TextSpan, replacement: string): Promise<EditResult> {
+    if (!word.editable) throw new Error(word.reason ?? "This text cannot be edited.");
     if (!replacement.trim()) throw new Error("Replacement text cannot be empty.");
 
     const first = word.glyphs[0]!;
@@ -124,7 +152,12 @@ export class PdfTextEditor {
 
     // Geometry in the text space of the first glyph (origin = word start in stream).
     const toText = invert(multiply(first.tm, firstOp.ctm));
-    const xs = word.glyphs.flatMap((g) => [apply(toText, ...g.origin)[0], apply(toText, ...g.end)[0]]);
+    // Leading/trailing spaces of a line don't define its visible edges.
+    const inked = word.glyphs.filter((g) => !/^\s*$/u.test(g.unicode) || g.unicode === "");
+    const xs = (inked.length ? inked : word.glyphs).flatMap((g) => [
+      apply(toText, ...g.origin)[0],
+      apply(toText, ...g.end)[0],
+    ]);
     const left = Math.min(...xs);
     const right = Math.max(...xs);
 
@@ -293,6 +326,7 @@ export class PdfTextEditor {
       glyphs: [],
       showOps: [],
       words: [],
+      lines: [],
       fonts: new Map(),
       fallbackNames: new Map(),
       dirty: false,
@@ -313,7 +347,9 @@ export class PdfTextEditor {
     model.glyphs = layout.glyphs;
     model.showOps = layout.showOps;
     const pageIndex = this.pages.indexOf(model);
-    model.words = buildWords(model.glyphs, `p${pageIndex < 0 ? this.pages.length : pageIndex}`);
+    const text = buildTextModel(model.glyphs, `p${pageIndex < 0 ? this.pages.length : pageIndex}`);
+    model.words = text.words;
+    model.lines = text.lines;
   }
 
   private resolveFont(model: PageModel, name: string): LayoutFont | null {
@@ -401,12 +437,31 @@ export class PdfTextEditor {
 
     // Zero-advance glyphs without Unicode (decomposed dots) are drawn after the
     // run so text rise changes don't split the word for text extraction.
+    // Flushed at every word boundary so each word's glyphs stay contiguous.
     const deferred: { glyph: (typeof seg.glyphs)[number]; at: number }[] = [];
+    const drawDeferred = () => {
+      if (!deferred.length) return;
+      const runEnd = advance;
+      for (const { glyph: g, at } of deferred) {
+        // Move the pen back to where the glyph belongs, then draw it raised.
+        push((-(at - advance) * 1000) / (tfs * th) - g.xOffset);
+        flush();
+        out.push(`${formatNumber(state.rise + (g.yOffset / 1000) * tfs)} Ts`);
+        rise = Number.NaN;
+        pending.push(g.bytes);
+        advance += ((g.width / 1000) * tfs + tc) * th;
+        push(g.xOffset + g.adjustAfter + (g.width === 0 && tc ? (tc * 1000) / tfs : 0));
+      }
+      push((-(runEnd - advance) * 1000) / (tfs * th));
+      deferred.length = 0;
+    };
+
     for (const g of seg.glyphs) {
       if (g.bytes.length > 0 && !g.unicode && g.yOffset !== 0 && Math.abs(g.width - g.adjustAfter) < 1e-6) {
         deferred.push({ glyph: g, at: advance });
         continue;
       }
+      if (/^\s$/u.test(g.unicode)) drawDeferred();
       if (g.bytes.length === 0) {
         push(g.adjustAfter);
         continue;
@@ -428,20 +483,7 @@ export class PdfTextEditor {
       if (g.width === 0 && tc) after += (tc * 1000) / tfs;
       push(after);
     }
-    if (deferred.length) {
-      const runEnd = advance;
-      for (const { glyph: g, at } of deferred) {
-        // Move the pen back to where the glyph belongs, then draw it raised.
-        push((-(at - advance) * 1000) / (tfs * th) - g.xOffset);
-        flush();
-        out.push(`${formatNumber(state.rise + (g.yOffset / 1000) * tfs)} Ts`);
-        rise = Number.NaN;
-        pending.push(g.bytes);
-        advance += ((g.width / 1000) * tfs + tc) * th;
-        push(g.xOffset + g.adjustAfter + (g.width === 0 && tc ? (tc * 1000) / tfs : 0));
-      }
-      push((-(runEnd - advance) * 1000) / (tfs * th));
-    }
+    drawDeferred();
     flush();
     if (!(Math.abs(rise - state.rise) < 1e-6)) out.push(`${formatNumber(state.rise)} Ts`);
     return { text: out.join("\n"), advance };
@@ -490,8 +532,10 @@ export class PdfTextEditor {
   }
 }
 
-function area(b: { x0: number; y0: number; x1: number; y1: number }): number {
-  return (b.x1 - b.x0) * (b.y1 - b.y0);
+function smallestHit<T extends TextSpan>(spans: readonly T[], x: number, y: number): T | null {
+  const area = (s: T) => (s.box.x1 - s.box.x0) * (s.box.y1 - s.box.y0);
+  const hits = spans.filter((s) => x >= s.box.x0 && x <= s.box.x1 && y >= s.box.y0 && y <= s.box.y1);
+  return hits.sort((a, b) => area(a) - area(b))[0] ?? null;
 }
 
 function displacement(elements: readonly ShowElement[], state: TextState): number {

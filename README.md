@@ -1,6 +1,7 @@
 # PDF In-Place Editor
 
 Browser-only engine for editing existing PDF text in place, in English, Arabic and mixed lines.
+You can replace a single word or a whole line (switch between **Word** and **Line** in the UI).
 Edits are written into the page content stream with the original operators and font. Nothing is
 painted over the old text and nothing is rasterised. The app makes no server calls and no external requests.
 
@@ -22,14 +23,17 @@ warning if it is missing; in CI the tests fail.
 | Parse the content stream, keeping each operator's byte range | `src/engine/contentStream.ts` |
 | Interpret text state (`Tf Tc Tw Tz TL Ts Td TD Tm T* Tj TJ ' "`, `q/Q`, `cm`) and position every glyph | `src/engine/textLayout.ts` |
 | Read fonts: `/Widths`, CID `/W`, ToUnicode, encodings, standard-14 metrics, embedded TrueType program | `src/engine/fonts.ts`, `cmap.ts` |
-| Group glyphs into lines and words; rebuild logical order for RTL | `src/engine/words.ts` |
+| Group glyphs into lines and words; rebuild logical order for RTL and mixed lines | `src/engine/words.ts` |
 | Bidi runs, Arabic joining forms, presentation-form decoding | `src/engine/arabic.ts` |
 | Re-encode the replacement in the original font, or a bundled one | `src/engine/encoder.ts`, `fallbackFont.ts` |
 | Rewrite only the affected operators and save | `src/engine/editor.ts` |
 
+API: `PdfTextEditor.load(bytes, fonts)`, then `words(page)` / `lines(page)`, `wordAt` / `lineAt(page, x, y)`,
+`replaceWord` / `replaceLine(page, id, text)`, and `save()`.
+
 Geometry rules:
 
-- The new word keeps its anchor: the left edge on LTR lines, the right edge on RTL lines.
+- The new word or line keeps its anchor: the left edge on LTR lines, the right edge on RTL lines.
 - The rest of the same line shifts by the width change, so word spacing is preserved. Other lines are untouched (no reflow).
 - Widths are recomputed from the font's own width tables with `Tc`, `Tw` and `Tz` applied:
   `tx = (w0/1000·Tfs + Tc + Tw[code 32 only])·Th`. `Tw` is emulated with TJ adjustments for 2-byte CID fonts, where the PDF spec does not apply it.
@@ -55,6 +59,10 @@ text extracts and searches as typed.
 
 ## Known limits (phase 1)
 
+- A replaced line is drawn in the font of its first glyph. If the line mixed styles (e.g. one bold word), the styling is not carried over
+  word by word. The edit result reports this in its notes.
+- A line counts as one line only if its glyphs are drawn consecutively in the content stream. Lines drawn in several separate places
+  are shown but can't be replaced as a whole; replace them word by word.
 - Text inside Form XObjects, Type 3 fonts, and Type0 fonts with non-Identity CMaps can be located but not re-encoded.
 - Bare CFF / Type 1 subsets can't be parsed. For those, only glyphs the document already uses are reused.
 - A fallback font is drawn at the original point size. Noto Naskh looks smaller than many Arabic UI fonts at the same size,

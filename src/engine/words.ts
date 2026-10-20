@@ -8,7 +8,8 @@ export interface Box {
   y1: number;
 }
 
-export interface TextWord {
+/** A run of glyphs on one line that can be replaced as a unit. */
+export interface TextSpan {
   id: string;
   /** Glyphs in content-stream order. */
   glyphs: PositionedGlyph[];
@@ -18,12 +19,25 @@ export interface TextWord {
   lineDirection: "ltr" | "rtl";
   /** User-space bounding box. */
   box: Box;
-  /** User-space bounding box of the containing line. */
-  lineBox: Box;
   /** Every glyph of the containing line with its position along the baseline. */
   line: ReadonlyMap<PositionedGlyph, number>;
   editable: boolean;
   reason?: string;
+}
+
+export interface TextWord extends TextSpan {
+  /** User-space bounding box of the containing line. */
+  lineBox: Box;
+}
+
+export interface TextLine extends TextSpan {
+  /** Words of the line in visual order (left to right). */
+  words: TextWord[];
+}
+
+export interface TextModel {
+  words: TextWord[];
+  lines: TextLine[];
 }
 
 const isBlank = (s: string) => s.length > 0 && /^\s+$/u.test(s);
@@ -36,23 +50,39 @@ function boxOf(glyphs: readonly PositionedGlyph[]): Box {
 }
 
 /**
- * Logical text of a word. Marks attach to the preceding base in stream order;
- * clusters are then ordered visually (reversed for RTL), so it works whether
- * the producer wrote RTL text in visual or in logical order.
+ * Logical text of a word. Base glyphs are ordered visually (reversed for RTL),
+ * so it works whether the producer wrote RTL text in visual or logical order.
+ * Marks attach to the base glyph they sit over (falling back to the previous
+ * base in stream order), since their stream position differs by producer.
  */
 export function logicalText(
   glyphs: readonly PositionedGlyph[],
   direction: "ltr" | "rtl",
   along: (g: PositionedGlyph) => number,
 ): string {
-  const clusters: { text: string; pos: number }[] = [];
+  const width = (g: PositionedGlyph) => Math.hypot(g.end[0] - g.origin[0], g.end[1] - g.origin[1]);
+  const inkWidth = (g: PositionedGlyph) => Math.hypot(g.quad[1]![0] - g.quad[0]![0], g.quad[1]![1] - g.quad[0]![1]);
+  const isAttached = (g: PositionedGlyph) => isMark(g.unicode) || g.unicode === "";
+
+  const clusters: { text: string; pos: number; end: number }[] = [];
   for (const g of glyphs) {
-    const last = clusters[clusters.length - 1];
-    if ((isMark(g.unicode) || g.unicode === "") && last) last.text += g.unicode;
-    else clusters.push({ text: g.unicode, pos: along(g) });
+    if (!isAttached(g)) clusters.push({ text: g.unicode, pos: along(g), end: along(g) + width(g) });
+  }
+  let previous: (typeof clusters)[number] | undefined;
+  let next = 0;
+  for (const g of glyphs) {
+    if (!isAttached(g)) {
+      previous = clusters[next];
+      next += 1;
+      continue;
+    }
+    const center = along(g) + inkWidth(g) / 2;
+    const host = clusters.find((c) => center >= c.pos - 0.01 && center <= c.end + 0.01) ?? previous ?? clusters[0];
+    if (host) host.text += g.unicode;
   }
   clusters.sort((a, b) => (direction === "rtl" ? b.pos - a.pos : a.pos - b.pos));
-  return clusters.map((c) => c.text).join("");
+  // Composed form, as users type and search it (أ rather than ا + hamza).
+  return clusters.map((c) => c.text).join("").normalize("NFC");
 }
 
 interface LineGlyph {
@@ -61,8 +91,33 @@ interface LineGlyph {
   across: number;
 }
 
+/** Stream glyph indices must be consecutive for the span to be rewritten in one place. */
+function contiguity(streamOrder: readonly PositionedGlyph[]): boolean {
+  const first = streamOrder[0]?.index ?? 0;
+  return streamOrder.every((g, k) => g.index === first + k);
+}
+
+/**
+ * Logical text of a line from its words in visual order: words are grouped
+ * into directional runs (neutral words follow the line), runs are reversed on
+ * RTL lines and RTL runs are read right to left.
+ */
+function logicalLineText(visualWords: readonly TextWord[], lineDirection: "ltr" | "rtl"): string {
+  const dirOf = (w: TextWord): "ltr" | "rtl" =>
+    w.direction === "rtl" ? "rtl" : /[\p{L}\p{N}]/u.test(w.text) ? "ltr" : lineDirection;
+  const runs: { dir: "ltr" | "rtl"; words: string[] }[] = [];
+  for (const w of visualWords) {
+    const dir = dirOf(w);
+    const last = runs[runs.length - 1];
+    if (last && last.dir === dir) last.words.push(w.text);
+    else runs.push({ dir, words: [w.text] });
+  }
+  if (lineDirection === "rtl") runs.reverse();
+  return runs.map((r) => (r.dir === "rtl" ? [...r.words].reverse() : r.words).join(" ")).join(" ");
+}
+
 /** Groups glyphs into baseline-aligned lines, then splits lines into words. */
-export function buildWords(glyphs: readonly PositionedGlyph[], pagePrefix: string): TextWord[] {
+export function buildTextModel(glyphs: readonly PositionedGlyph[], pagePrefix: string): TextModel {
   const lines: { dir: [number, number]; origin: [number, number]; size: number; items: LineGlyph[] }[] = [];
 
   for (const glyph of glyphs) {
@@ -88,7 +143,9 @@ export function buildWords(glyphs: readonly PositionedGlyph[], pagePrefix: strin
   }
 
   const words: TextWord[] = [];
+  const textLines: TextLine[] = [];
   lines.forEach((line, lineIndex) => {
+    const lineWords: TextWord[] = [];
     const visual = [...line.items].sort((a, b) => a.along - b.along);
     const lineText = visual.map((v) => v.glyph.unicode).join("");
     const rtlCount = [...lineText].filter((ch) => hasStrongRtl(ch)).length;
@@ -125,13 +182,12 @@ export function buildWords(glyphs: readonly PositionedGlyph[], pagePrefix: strin
       // Groups of only Unicode-less glyphs (stray dots) are not words.
       if (group.every((g) => g.glyph.unicode === "")) return;
       const streamOrder = group.map((g) => g.glyph).sort((a, b) => a.index - b.index);
-      const first = streamOrder[0]!.index;
-      const contiguous = streamOrder.every((g, k) => g.index === first + k);
+      const contiguous = contiguity(streamOrder);
       const raw = streamOrder.map((g) => g.unicode).join("");
       const direction = hasStrongRtl(raw) ? "rtl" : "ltr";
       const missingUnicode = streamOrder.every((g) => g.unicode === "");
       const alongOf = new Map(group.map((g) => [g.glyph, g.along]));
-      words.push({
+      lineWords.push({
         id: `${pagePrefix}-${lineIndex}-${wordIndex}`,
         glyphs: streamOrder,
         text: logicalText(streamOrder, direction, (g) => alongOf.get(g) ?? 0),
@@ -148,6 +204,26 @@ export function buildWords(glyphs: readonly PositionedGlyph[], pagePrefix: strin
             : undefined,
       });
     });
+    if (lineWords.length === 0) return;
+    words.push(...lineWords);
+
+    const streamOrder = visual.map((v) => v.glyph).sort((a, b) => a.index - b.index);
+    const contiguous = contiguity(streamOrder);
+    const readOnly = lineWords.find((w) => !w.editable);
+    textLines.push({
+      id: `${pagePrefix}-line-${lineIndex}`,
+      glyphs: streamOrder,
+      text: logicalLineText(lineWords, lineDirection),
+      direction: lineDirection,
+      lineDirection,
+      box: lineBox,
+      line: lineAlong,
+      words: lineWords,
+      editable: contiguous && !readOnly,
+      reason: !contiguous
+        ? "The line is drawn in several separate places in the content stream."
+        : readOnly?.reason,
+    });
   });
-  return words;
+  return { words, lines: textLines };
 }

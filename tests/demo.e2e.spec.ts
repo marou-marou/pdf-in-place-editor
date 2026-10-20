@@ -4,7 +4,13 @@ import { extractsText, hasQpdf, qpdfCheck } from "./helpers";
 
 // The client's milestone-1 demo, driven through the real UI in a browser.
 
-async function editAndDownload(page: Page, fixture: string, word: string, replacement: string) {
+async function editAndDownload(
+  page: Page,
+  fixture: string,
+  word: string,
+  replacement: string,
+  mode: "word" | "line" = "word",
+) {
   const external: string[] = [];
   page.on("request", (req) => {
     if (!req.url().startsWith("http://localhost") && !req.url().startsWith("blob:") && !req.url().startsWith("data:")) {
@@ -15,12 +21,14 @@ async function editAndDownload(page: Page, fixture: string, word: string, replac
   await page.goto("/");
   await page.setInputFiles("#pdf-file", `tests/fixtures/${fixture}`);
   await expect(page.locator("#status")).toContainText("words on page 1");
+  if (mode === "line") await page.check('input[name="mode"][value="line"]');
 
   await page.locator(`.text-hitbox[data-text="${word}"]`).first().click();
   await page.fill("#replacement-text", replacement);
   await page.click("#apply-replacement");
   await expect(page.locator("#edit-status")).toContainText("Replaced");
-  for (const part of replacement.split(" ")) {
+  const parts = mode === "line" ? [replacement] : replacement.split(" ");
+  for (const part of parts) {
     await expect(page.locator(`.text-hitbox[data-text="${part}"]`).first()).toBeVisible();
   }
 
@@ -48,4 +56,21 @@ test("Mixed line: replace a word with Arabic and digits", async ({ page }) => {
   const bytes = await editAndDownload(page, "chrome-mixed.pdf", "عام", "سنة 2025");
   expect(await extractsText(bytes, "2025")).toBe(true);
   expect(await extractsText(bytes, "سنة")).toBe(true);
+});
+
+test("Line mode: replace a whole Arabic line", async ({ page }) => {
+  const bytes = await editAndDownload(
+    page,
+    "chrome-arabic.pdf",
+    "مرحبا بكم في التقرير السنوي",
+    "أهلا وسهلا بكم في التقرير",
+    "line",
+  );
+  expect(await extractsText(bytes, "أهلا وسهلا بكم في التقرير")).toBe(true);
+});
+
+test("Line mode: replace a bold English heading line", async ({ page }) => {
+  const bytes = await editAndDownload(page, "chrome-heading.pdf", "Annual Report Overview", "Quarterly Business Review", "line");
+  expect(await extractsText(bytes, "Quarterly Business Review")).toBe(true);
+  expect(await extractsText(bytes, "Regular body text follows the heading.")).toBe(true);
 });

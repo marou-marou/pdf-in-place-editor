@@ -1,5 +1,5 @@
 import "./style.css";
-import { PdfTextEditor, type FallbackKind, type FontProvider, type TextWord } from "./engine";
+import { PdfTextEditor, type FallbackKind, type FontProvider, type TextSpan } from "./engine";
 import { renderPage } from "./pdfRenderer";
 
 const FONT_FILES: Record<FallbackKind, [string, string]> = {
@@ -23,12 +23,18 @@ if (!app) throw new Error("App container not found.");
 app.innerHTML = `
   <main class="editor">
     <h1>PDF In-Place Editor</h1>
-    <p>Open a PDF, click a word, type its replacement and save. Text is edited in the
+    <p>Open a PDF, click a word or a line, type its replacement and save. Text is edited in the
       page content stream, not drawn over.</p>
 
     <label for="pdf-file">Choose a PDF file</label>
     <input id="pdf-file" type="file" accept="application/pdf" />
     <p id="status" role="status">Waiting for a PDF...</p>
+
+    <fieldset class="mode">
+      <legend>Select</legend>
+      <label><input type="radio" name="mode" value="word" checked /> Word</label>
+      <label><input type="radio" name="mode" value="line" /> Line</label>
+    </fieldset>
 
     <nav class="pager" hidden>
       <button id="prev-page" type="button">Previous page</button>
@@ -44,7 +50,7 @@ app.innerHTML = `
     </div>
 
     <section id="selection-panel" aria-live="polite">
-      <h2>Selected word</h2>
+      <h2>Selection</h2>
       <dl>
         <dt>Text</dt>
         <dd id="selected-text" dir="auto">None</dd>
@@ -83,9 +89,10 @@ let editor: PdfTextEditor | null = null;
 let fileName = "document.pdf";
 let currentBytes: Uint8Array | null = null;
 let pageIndex = 0;
-let selected: TextWord | null = null;
+let selected: TextSpan | null = null;
+let mode: "word" | "line" = "word";
 
-function select(word: TextWord | null, button?: HTMLButtonElement): void {
+function select(word: TextSpan | null, button?: HTMLButtonElement): void {
   overlay.querySelectorAll(".selected").forEach((el) => el.classList.remove("selected"));
   selected = word;
   button?.classList.add("selected");
@@ -105,13 +112,14 @@ async function showPage(): Promise<void> {
   if (!editor || !currentBytes) return;
   const rendered = await renderPage(currentBytes, pageIndex, canvas);
   overlay.replaceChildren();
-  for (const word of editor.words(pageIndex)) {
+  const spans = mode === "line" ? editor.lines(pageIndex) : editor.words(pageIndex);
+  for (const word of spans) {
     const [left, top, width, height] = rendered.toCanvasRect(word.box.x0, word.box.y0, word.box.x1, word.box.y1);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "text-hitbox";
     button.dataset.text = word.text;
-    button.setAttribute("aria-label", `Edit word: ${word.text}`);
+    button.setAttribute("aria-label", `Edit ${mode}: ${word.text}`);
     button.disabled = !word.editable;
     button.style.left = `${(left / canvas.width) * 100}%`;
     button.style.top = `${(top / canvas.height) * 100}%`;
@@ -151,7 +159,10 @@ form.addEventListener("submit", async (event) => {
   if (!editor || !selected) return;
   applyButton.disabled = true;
   try {
-    const result = await editor.replaceWord(pageIndex, selected.id, replacementInput.value);
+    const result =
+      mode === "line"
+        ? await editor.replaceLine(pageIndex, selected.id, replacementInput.value)
+        : await editor.replaceWord(pageIndex, selected.id, replacementInput.value);
     // Re-render from the saved bytes so the preview is exactly the output file.
     currentBytes = await editor.save();
     select(null);
@@ -175,6 +186,15 @@ downloadButton.addEventListener("click", () => {
   link.download = `edited-${fileName}`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+document.querySelectorAll<HTMLInputElement>('input[name="mode"]').forEach((radio) => {
+  radio.addEventListener("change", () => {
+    mode = radio.value === "line" ? "line" : "word";
+    select(null);
+    editStatus.textContent = `Select a ${mode} to begin editing.`;
+    void showPage();
+  });
 });
 
 prevButton.addEventListener("click", () => {

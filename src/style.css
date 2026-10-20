@@ -143,3 +143,22 @@ input {
   min-width: 16rem;
   font-size: 1rem;
 }
+
+.mode {
+  display: flex;
+  gap: 16px;
+  margin: 16px 0;
+  border: none;
+  padding: 0;
+}
+
+.mode legend {
+  float: left;
+  margin-right: 8px;
+  font-weight: 600;
+}
+
+.mode input {
+  display: inline;
+  margin: 0 4px 0 0;
+}
