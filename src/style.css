@@ -432,6 +432,13 @@ svg {
   color: var(--ink-soft);
 }
 
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
 .empty-state .empty-note {
   margin: 16px 0 0;
   font-size: 12px;

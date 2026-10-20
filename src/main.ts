@@ -67,7 +67,10 @@ app.innerHTML = `
             <h1>Edit PDF text in place</h1>
             <p>Drop a PDF here, or open one. English, Arabic and mixed lines keep their font,
               position and spacing.</p>
-            <label class="btn btn-primary" for="pdf-file">${icon.upload}<span>Choose a PDF</span></label>
+            <div class="empty-actions">
+              <label class="btn btn-primary" for="pdf-file">${icon.upload}<span>Choose a PDF</span></label>
+              <button id="try-sample" class="btn btn-ghost" type="button">Try a sample</button>
+            </div>
             <p class="empty-note">Everything runs on your device. Nothing is uploaded.</p>
           </div>
           <div id="page-wrapper" hidden>
@@ -219,6 +222,18 @@ async function openFile(file: File): Promise<void> {
     status.dataset.tone = "error";
   }
 }
+
+// Bundled sample (Arabic in two fonts, English, a mixed line) for first-time visitors.
+$<HTMLButtonElement>("#try-sample").addEventListener("click", async () => {
+  const res = await fetch(`${import.meta.env.BASE_URL}samples/sample-arabic-english.pdf`);
+  if (!res.ok) {
+    status.textContent = "The sample PDF is missing.";
+    status.dataset.tone = "error";
+    return;
+  }
+  const blob = await res.blob();
+  void openFile(new File([blob], "sample-arabic-english.pdf", { type: "application/pdf" }));
+});
 
 input.addEventListener("change", () => {
   const file = input.files?.[0];

@@ -1,5 +1,9 @@
 # PDF In-Place Editor
 
+[![CI](https://github.com/marou-marou/pdf-in-place-editor/actions/workflows/ci.yml/badge.svg)](https://github.com/marou-marou/pdf-in-place-editor/actions/workflows/ci.yml)
+
+**Live demo:** https://marou-marou.github.io/pdf-in-place-editor/ (open a PDF or click *Try a sample*)
+
 Browser-only engine for editing existing PDF text in place, in English, Arabic and mixed lines.
 You can replace a single word or a whole line (switch between **Word** and **Line** in the UI).
 Edits are written into the page content stream with the original operators and font. Nothing is
@@ -12,6 +16,9 @@ npm run dev        # http://localhost:5173
 npm test           # Playwright: engine tests + browser demo tests, qpdf --check on every output
 npm run fixtures   # regenerates tests/fixtures (pdf-lib + Chromium-printed PDFs)
 ```
+
+Every push runs the typecheck and the Playwright suite (with `qpdf --check`) on GitHub Actions. On `main`, once the
+tests pass, the app is built and published to GitHub Pages (`.github/workflows/ci.yml`).
 
 `qpdf` must be on the PATH for the output checks (`brew install qpdf`). Locally they are skipped with a
 warning if it is missing; in CI the tests fail.
